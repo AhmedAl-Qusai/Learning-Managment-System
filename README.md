@@ -1,4 +1,4 @@
-# UniTaskSystem - نسخة محدثة
+# UniTaskSystem 
 
 ## 1) إنشاء قاعدة البيانات
 1) افتح **SQL Server Management Studio (SSMS)**.
