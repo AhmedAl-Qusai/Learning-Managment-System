@@ -1,0 +1,810 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using UniTaskSystem.Services;
+using System.IO;
+using System.Diagnostics;
+using UniTaskSystem.UI.UI_Theme;
+
+
+namespace UniTaskSystem.UI.Forms
+{
+    public partial class TeacherCourseForm : Form
+    {
+        private readonly string _teacherId;
+        private readonly int _offeringId;
+        private DataTable _gradesDt;
+        private readonly TeacherService _svc = new TeacherService();
+
+        private List<string> _pickedFiles =
+            new List<string>();
+
+        private DataTable _subsDt;
+
+        // إدارة المنشورات
+        private TabPage _tabManagePosts;
+        private DataGridView _dgvPosts;
+        private TextBox _txtPostSearch;
+        private ComboBox _cmbPostTypeFilter;
+        private Label _lblPostId;
+        private ComboBox _cmbEditType;
+        private TextBox _txtEditTitle;
+        private RichTextBox _rtbEditBody;
+        private CheckBox _chkEditDeadline;
+        private DateTimePicker _dtpEditDeadline;
+        private Button _btnUpdatePost;
+        private Button _btnDeletePost;
+        private Button _btnViewPostAttachments;
+        private Button _btnClearPost;
+
+        // بحث درجات الطلاب
+        private TextBox _txtGradeSearch;
+        private BindingSource _gradesBs;
+
+        public TeacherCourseForm(string teacherId, int offeringId)
+        {
+            InitializeComponent();
+            _teacherId = teacherId;
+            _offeringId = offeringId;
+        }
+
+        private void TeacherCourseForm_Load(object sender, EventArgs e)
+        {
+            Theme.ApplyForm(this);
+            Theme.StyleGrid(dgvGrades);
+            Theme.StyleGrid(dgvPlan);
+            Theme.StyleGrid(dgvSubs);
+            LoadHeader();
+            cmbPostType.Items.Clear();
+            cmbPostType.Items.Add("مهمة");
+            cmbPostType.Items.Add("مقرر");
+            cmbPostType.Items.Add("نماذج");
+            cmbPostType.SelectedIndex = 0;
+            chkDeadline.Checked = true;
+            LoadTasksCombo();
+            LoadGrades();
+            EnsureStudentWorkButtonColumn();
+            LoadPlan();
+
+            InitGradesSearchUI();
+            InitManagePostsTab();
+        }
+
+        private void LoadHeader()
+        {
+            DataTable dt = _svc.GetOfferingHeader(_offeringId);
+            if (dt.Rows.Count == 0) return;
+
+            var r = dt.Rows[0];
+            lblHeader.Text = $"{r["CourseName"]} ({r["Code"]}) - {r["OfferingType"]}";
+        }
+
+        private void btnAddAttach_Click(object sender, EventArgs e)
+        {
+            ofd.Multiselect = true;
+            if (ofd.ShowDialog() != DialogResult.OK) return;
+
+            foreach (string f in ofd.FileNames)
+            {
+                _pickedFiles.Add(f);
+                lstAttach.Items.Add(Path.GetFileName(f));
+            }
+        }
+
+        private void btnSend_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                string type = cmbPostType.SelectedItem.ToString();
+                string title = txtTitle.Text.Trim();
+                string body = rtbBody.Text;
+
+                if (string.IsNullOrWhiteSpace(title))
+                {
+                    MessageBox.Show("اكتب عنوان الرسالة");
+                    return;
+                }
+
+                DateTime? dl = null;
+                if (chkDeadline.Checked) dl = dtpDeadline.Value;
+
+                int postId = _svc.CreatePost(_offeringId, type, title, body, dl, _teacherId);
+
+                // حفظ المرفقات (نسخها لمجلد ثابت + إدخالها في DB)
+                string destDir = Path.Combine(@"C:\UniTaskSystem\PostAttachments", postId.ToString());
+                Directory.CreateDirectory(destDir);
+
+                foreach (string src in _pickedFiles)
+                {
+                    string fileName = Path.GetFileName(src);
+                    string destPath = Path.Combine(destDir, fileName);
+                    destPath = MakeUniquePath(destPath);
+
+                    File.Copy(src, destPath, true);
+
+                    var fi = new FileInfo(destPath);
+                    _svc.AddPostAttachment(postId, fi.Name, destPath, null, fi.Length);
+                }
+
+                MessageBox.Show("تم الإرسال ✅");
+                txtTitle.Clear();
+                rtbBody.Clear();
+                lstAttach.Items.Clear();
+                _pickedFiles.Clear();
+
+                // تحديث قائمة المهام في تبويب الاستقبال إذا كانت مهمة
+                if (type == "مهمة")
+                    LoadTasksCombo();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        }
+
+        private string MakeUniquePath(string path)
+        {
+            if (!File.Exists(path)) return path;
+
+            string dir = Path.GetDirectoryName(path);
+            string name = Path.GetFileNameWithoutExtension(path);
+            string ext = Path.GetExtension(path);
+
+            int i = 1;
+            while (true)
+            {
+                string p = Path.Combine(dir, name + "_" + i + ext);
+                if (!File.Exists(p)) return p;
+                i++;
+            }
+        }
+
+        private void LoadTasksCombo()
+        {
+            var dt = _svc.GetCourseTasks(_offeringId);
+            cmbTasks.DisplayMember = "Title";
+            cmbTasks.ValueMember = "PostId";
+            cmbTasks.DataSource = dt;
+
+            if (dt.Rows.Count > 0)
+                cmbTasks.SelectedIndex = 0;
+        }
+
+        private void cmbTasks_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            LoadSubmissions();
+        }
+
+        private void LoadSubmissions()
+        {
+            if (cmbTasks.SelectedValue == null) return;
+
+            int postId = Convert.ToInt32(cmbTasks.SelectedValue);
+            _subsDt = _svc.GetSubmissionsForPost(postId);
+
+            dgvSubs.DataSource = _subsDt;
+            dgvSubs.ReadOnly = true;
+            dgvSubs.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvSubs.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            dgvSubs.AllowUserToAddRows = false;
+
+            if (dgvSubs.Columns["SubmissionId"] != null)
+                dgvSubs.Columns["SubmissionId"].Visible = false;
+        }
+
+        private void btnGrade_Click(object sender, EventArgs e)
+        {
+            if (dgvSubs.CurrentRow == null) return;
+
+            int submissionId = Convert.ToInt32(dgvSubs.CurrentRow.Cells["SubmissionId"].Value);
+            var f = new GradeSubmissionForm(_teacherId, submissionId);
+            f.ShowDialog();
+            LoadGrades();
+            // بعد التصحيح لا يلزم تحديث هنا، لكن ممكن
+            LoadSubmissions();
+        }
+        private void LoadGrades()
+        {
+            _gradesDt = _svc.GetGradeSheet(_offeringId);
+            _gradesBs = new BindingSource { DataSource = _gradesDt };
+            dgvGrades.DataSource = _gradesBs;
+            EnsureStudentWorkButtonColumn();
+            dgvGrades.Columns["السقف"].DisplayIndex = 2;
+            dgvGrades.Columns["السقف"].ReadOnly = true;
+            dgvGrades.AllowUserToAddRows = false;
+            dgvGrades.RowHeadersVisible = false;
+            dgvGrades.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvGrades.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+
+            // أعمدة قراءة فقط
+            dgvGrades.Columns["الرقم_الجامعي"].ReadOnly = true;
+            dgvGrades.Columns["اسم_الطالب"].ReadOnly = true;
+            dgvGrades.Columns["التكاليف"].ReadOnly = true; // محسوبة من تصحيح المهام
+            dgvGrades.Columns["المجموع"].ReadOnly = true;  // محسوب
+
+            // أعمدة قابلة للتعديل
+            dgvGrades.Columns["الحضور"].ReadOnly = false;
+            dgvGrades.Columns["النصفي"].ReadOnly = false;
+            dgvGrades.Columns["النهائي"].ReadOnly = false;
+
+            // تنسيق بسيط
+            dgvGrades.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            dgvGrades.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+        }
+
+        private void InitGradesSearchUI()
+        {
+            // إضافة مربع بحث أعلى جدول الدرجات (داخل مساحة 42px الموجودة)
+            if (_txtGradeSearch != null) return;
+
+            var lbl = new Label();
+            lbl.Text = "بحث طالب:";
+            lbl.AutoSize = true;
+            lbl.ForeColor = Color.White;
+            lbl.Location = new Point(10, 12);
+
+            _txtGradeSearch = new TextBox();
+            _txtGradeSearch.Width = 220;
+            _txtGradeSearch.Location = new Point(90, 9);
+
+            _txtGradeSearch.TextChanged += (s, e) =>
+            {
+                if (_gradesBs == null) return;
+
+                string q = (_txtGradeSearch.Text ?? "").Replace("'", "''").Trim();
+                if (q == "")
+                {
+                    _gradesBs.RemoveFilter();
+                }
+                else
+                {
+                    // بحث بالرقم الجامعي أو الاسم
+                    _gradesBs.Filter = $"Convert([الرقم_الجامعي], 'System.String') LIKE '%{q}%' OR [اسم_الطالب] LIKE '%{q}%'";
+                }
+            };
+
+            tabGrades.Controls.Add(lbl);
+            tabGrades.Controls.Add(_txtGradeSearch);
+            lbl.BringToFront();
+            _txtGradeSearch.BringToFront();
+        }
+
+        private void InitManagePostsTab()
+        {
+            if (_tabManagePosts != null) return;
+
+            _tabManagePosts = new TabPage("إدارة المنشورات");
+            _tabManagePosts.BackColor = Color.SteelBlue;
+            _tabManagePosts.RightToLeft = RightToLeft.Yes;
+
+            var root = new TableLayoutPanel();
+            root.Dock = DockStyle.Fill;
+            root.RowCount = 2;
+            root.ColumnCount = 1;
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            var searchPanel = new Panel();
+            searchPanel.Dock = DockStyle.Fill;
+            searchPanel.Padding = new Padding(8, 6, 8, 6);
+            searchPanel.BackColor = Color.FromArgb(245, 247, 250);
+
+            var lblQ = new Label { Text = "بحث:", AutoSize = true, Dock = DockStyle.Right, TextAlign = ContentAlignment.MiddleRight };
+
+            _txtPostSearch = new TextBox();
+            _txtPostSearch.Width = 250;
+            _txtPostSearch.Dock = DockStyle.Right;
+
+            _cmbPostTypeFilter = new ComboBox();
+            _cmbPostTypeFilter.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cmbPostTypeFilter.Width = 120;
+            _cmbPostTypeFilter.Dock = DockStyle.Right;
+            _cmbPostTypeFilter.Items.AddRange(new object[] { "الكل", "مهمة", "مقرر", "نماذج" });
+            _cmbPostTypeFilter.SelectedIndex = 0;
+
+            var btnRefresh = new Button { Text = "تحديث", Width = 90, Dock = DockStyle.Right };
+            btnRefresh.Click += (s, e) => LoadPosts();
+
+            searchPanel.Controls.Add(btnRefresh);
+            searchPanel.Controls.Add(_cmbPostTypeFilter);
+            searchPanel.Controls.Add(_txtPostSearch);
+            searchPanel.Controls.Add(lblQ);
+
+            _txtPostSearch.TextChanged += (s, e) => LoadPosts();
+            _cmbPostTypeFilter.SelectedIndexChanged += (s, e) => LoadPosts();
+
+            var split = new SplitContainer();
+            split.Dock = DockStyle.Fill;
+            split.Orientation = Orientation.Vertical;
+            split.SplitterDistance = 560;
+            split.RightToLeft = RightToLeft.Yes;
+
+            _dgvPosts = new DataGridView();
+            _dgvPosts.Dock = DockStyle.Fill;
+            Theme.StyleGrid(_dgvPosts);
+            _dgvPosts.ReadOnly = true;
+            _dgvPosts.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            _dgvPosts.MultiSelect = false;
+            _dgvPosts.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+
+            _dgvPosts.SelectionChanged += (s, e) => LoadSelectedPostToEditor();
+
+            split.Panel1.Controls.Add(_dgvPosts);
+
+            var editor = BuildPostEditorPanel();
+            split.Panel2.Controls.Add(editor);
+
+            root.Controls.Add(searchPanel, 0, 0);
+            root.Controls.Add(split, 0, 1);
+            _tabManagePosts.Controls.Add(root);
+
+            tabCourse.TabPages.Add(_tabManagePosts);
+
+            LoadPosts();
+        }
+
+        private Control BuildPostEditorPanel()
+        {
+            var pnl = new Panel();
+            pnl.Dock = DockStyle.Fill;
+            pnl.Padding = new Padding(10);
+            pnl.BackColor = Color.FromArgb(245, 247, 250);
+
+            var tlp = new TableLayoutPanel();
+            tlp.Dock = DockStyle.Fill;
+            tlp.ColumnCount = 2;
+            tlp.RowCount = 8;
+            tlp.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
+            tlp.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
+
+            for (int i = 0; i < 8; i++)
+                tlp.RowStyles.Add(new RowStyle(i == 4 ? SizeType.Percent : SizeType.Absolute, i == 4 ? 100 : 34));
+
+            _lblPostId = new Label();
+            _lblPostId.Text = "PostId: -";
+            _lblPostId.AutoSize = true;
+            _lblPostId.ForeColor = Theme.Text;
+
+            _cmbEditType = new ComboBox();
+            _cmbEditType.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cmbEditType.Items.AddRange(new object[] { "مهمة", "مقرر", "نماذج" });
+            _cmbEditType.SelectedIndex = 0;
+
+            _txtEditTitle = new TextBox();
+            _rtbEditBody = new RichTextBox();
+            _rtbEditBody.Height = 120;
+
+            _chkEditDeadline = new CheckBox();
+            _chkEditDeadline.Text = "موعد نهائي";
+            _chkEditDeadline.Checked = true;
+
+            _dtpEditDeadline = new DateTimePicker();
+            _dtpEditDeadline.Format = DateTimePickerFormat.Custom;
+            _dtpEditDeadline.CustomFormat = "yyyy-MM-dd HH:mm";
+
+            _chkEditDeadline.CheckedChanged += (s, e) => _dtpEditDeadline.Enabled = _chkEditDeadline.Checked;
+
+            _btnUpdatePost = new Button();
+            _btnUpdatePost.Text = "حفظ التعديل";
+            _btnUpdatePost.BackColor = Color.MidnightBlue;
+            _btnUpdatePost.ForeColor = Color.White;
+            _btnUpdatePost.Click += (s, e) => UpdateSelectedPost();
+
+            _btnDeletePost = new Button();
+            _btnDeletePost.Text = "حذف";
+            _btnDeletePost.BackColor = Color.FromArgb(192, 0, 0);
+            _btnDeletePost.ForeColor = Color.White;
+            _btnDeletePost.Click += (s, e) => DeleteSelectedPost();
+
+            _btnViewPostAttachments = new Button();
+            _btnViewPostAttachments.Text = "المرفقات";
+            _btnViewPostAttachments.Click += (s, e) => ViewSelectedPostAttachments();
+
+            _btnClearPost = new Button();
+            _btnClearPost.Text = "تفريغ";
+            _btnClearPost.Click += (s, e) => ClearPostEditor();
+
+            // Row0: id
+            tlp.Controls.Add(new Label { Text = "المعرف:", AutoSize = true, TextAlign = ContentAlignment.MiddleRight }, 0, 0);
+            tlp.Controls.Add(_lblPostId, 1, 0);
+
+            // Row1: type
+            tlp.Controls.Add(new Label { Text = "النوع:", AutoSize = true, TextAlign = ContentAlignment.MiddleRight }, 0, 1);
+            tlp.Controls.Add(_cmbEditType, 1, 1);
+
+            // Row2: title
+            tlp.Controls.Add(new Label { Text = "العنوان:", AutoSize = true, TextAlign = ContentAlignment.MiddleRight }, 0, 2);
+            tlp.Controls.Add(_txtEditTitle, 1, 2);
+
+            // Row3: deadline
+            var deadlinePanel = new FlowLayoutPanel();
+            deadlinePanel.Dock = DockStyle.Fill;
+            deadlinePanel.FlowDirection = FlowDirection.RightToLeft;
+            deadlinePanel.WrapContents = false;
+            deadlinePanel.Controls.Add(_dtpEditDeadline);
+            deadlinePanel.Controls.Add(_chkEditDeadline);
+
+            tlp.Controls.Add(new Label { Text = "الموعد:", AutoSize = true, TextAlign = ContentAlignment.MiddleRight }, 0, 3);
+            tlp.Controls.Add(deadlinePanel, 1, 3);
+
+            // Row4: body
+            tlp.Controls.Add(new Label { Text = "المحتوى:", AutoSize = true, TextAlign = ContentAlignment.MiddleRight }, 0, 4);
+            tlp.Controls.Add(_rtbEditBody, 1, 4);
+
+            // Row5: buttons
+            var btns = new FlowLayoutPanel();
+            btns.Dock = DockStyle.Fill;
+            btns.FlowDirection = FlowDirection.RightToLeft;
+            btns.WrapContents = false;
+            btns.Height = 36;
+            btns.Controls.Add(_btnDeletePost);
+            btns.Controls.Add(_btnUpdatePost);
+            btns.Controls.Add(_btnViewPostAttachments);
+            btns.Controls.Add(_btnClearPost);
+
+            tlp.Controls.Add(new Label { Text = "", AutoSize = true }, 0, 5);
+            tlp.Controls.Add(btns, 1, 5);
+
+            pnl.Controls.Add(tlp);
+            return pnl;
+        }
+
+        private void LoadPosts()
+        {
+            if (_dgvPosts == null) return;
+            string q = (_txtPostSearch?.Text ?? "").Trim();
+            string type = (_cmbPostTypeFilter?.SelectedItem ?? "الكل").ToString();
+            if (type == "الكل") type = null;
+
+            _dgvPosts.DataSource = _svc.GetOfferingPosts(_offeringId, _teacherId, q, type);
+            if (_dgvPosts.Columns["PostId"] != null) _dgvPosts.Columns["PostId"].Visible = false;
+            if (_dgvPosts.Columns["CreatedAt"] != null) _dgvPosts.Columns["CreatedAt"].DefaultCellStyle.Format = "yyyy-MM-dd HH:mm";
+            if (_dgvPosts.Columns["Deadline"] != null) _dgvPosts.Columns["Deadline"].DefaultCellStyle.Format = "yyyy-MM-dd HH:mm";
+        }
+
+        private void LoadSelectedPostToEditor()
+        {
+            if (_dgvPosts == null || _dgvPosts.CurrentRow == null) return;
+            if (_dgvPosts.CurrentRow.Cells["PostId"].Value == null) return;
+
+            int postId = Convert.ToInt32(_dgvPosts.CurrentRow.Cells["PostId"].Value);
+            var dt = _svc.GetPostDetails(postId);
+            if (dt.Rows.Count == 0) return;
+
+            var r = dt.Rows[0];
+            _lblPostId.Text = "PostId: " + postId;
+
+            string t = r["PostType"].ToString();
+            int idx = _cmbEditType.Items.IndexOf(t);
+            _cmbEditType.SelectedIndex = idx >= 0 ? idx : 0;
+
+            _txtEditTitle.Text = r["Title"].ToString();
+            _rtbEditBody.Text = r["Body"] == DBNull.Value ? "" : r["Body"].ToString();
+
+            if (r["Deadline"] == DBNull.Value)
+            {
+                _chkEditDeadline.Checked = false;
+                _dtpEditDeadline.Enabled = false;
+            }
+            else
+            {
+                _chkEditDeadline.Checked = true;
+                _dtpEditDeadline.Enabled = true;
+                _dtpEditDeadline.Value = Convert.ToDateTime(r["Deadline"]);
+            }
+        }
+
+        private int GetEditorPostId()
+        {
+            if (_lblPostId == null) return 0;
+            string s = (_lblPostId.Text ?? "").Replace("PostId:", "").Trim();
+            int id;
+            return int.TryParse(s, out id) ? id : 0;
+        }
+
+        private void UpdateSelectedPost()
+        {
+            try
+            {
+                int postId = GetEditorPostId();
+                if (postId == 0)
+                {
+                    MessageBox.Show("اختر منشوراً من القائمة أولاً.");
+                    return;
+                }
+
+                string type = _cmbEditType.SelectedItem.ToString();
+                string title = (_txtEditTitle.Text ?? "").Trim();
+                string body = _rtbEditBody.Text;
+                DateTime? dl = _chkEditDeadline.Checked ? (DateTime?)_dtpEditDeadline.Value : null;
+
+                if (string.IsNullOrWhiteSpace(title))
+                {
+                    MessageBox.Show("اكتب عنواناً.");
+                    return;
+                }
+
+                _svc.UpdatePost(postId, _teacherId, _offeringId, type, title, body, dl);
+                MessageBox.Show("تم تحديث المنشور ✅");
+                LoadPosts();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        }
+
+        private void DeleteSelectedPost()
+        {
+            try
+            {
+                int postId = GetEditorPostId();
+                if (postId == 0)
+                {
+                    MessageBox.Show("اختر منشوراً من القائمة أولاً.");
+                    return;
+                }
+
+                if (MessageBox.Show("هل أنت متأكد من حذف هذا المنشور؟", "تأكيد", MessageBoxButtons.YesNo) != DialogResult.Yes)
+                    return;
+
+                _svc.DeletePost(postId, _teacherId, _offeringId);
+                MessageBox.Show("تم الحذف ✅");
+                ClearPostEditor();
+                LoadPosts();
+                LoadTasksCombo();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        }
+
+        private void ViewSelectedPostAttachments()
+        {
+            try
+            {
+                int postId = GetEditorPostId();
+                if (postId == 0)
+                {
+                    MessageBox.Show("اختر منشوراً أولاً.");
+                    return;
+                }
+
+                var dt = _svc.GetPostAttachments(postId);
+                if (dt.Rows.Count == 0)
+                {
+                    MessageBox.Show("لا توجد مرفقات.");
+                    return;
+                }
+
+                var f = new AttachmentsViewerForm(dt);
+                f.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        }
+
+        private void ClearPostEditor()
+        {
+            if (_lblPostId != null) _lblPostId.Text = "PostId: -";
+            if (_cmbEditType != null && _cmbEditType.Items.Count > 0) _cmbEditType.SelectedIndex = 0;
+            if (_txtEditTitle != null) _txtEditTitle.Clear();
+            if (_rtbEditBody != null) _rtbEditBody.Clear();
+            if (_chkEditDeadline != null) _chkEditDeadline.Checked = true;
+        }
+
+        private void dgvGrades_CellValueChanged(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+
+            // فقط لو تغيّر حضور/نصفي/نهائي
+            string col = dgvGrades.Columns[e.ColumnIndex].Name;
+            if (col != "الحضور" && col != "النصفي" && col != "النهائي") return;
+
+            var row = dgvGrades.Rows[e.RowIndex];
+
+            int att = ToInt(row.Cells["الحضور"].Value);
+            int tasks = ToInt(row.Cells["التكاليف"].Value);
+            int mid = ToInt(row.Cells["النصفي"].Value);
+            int fin = ToInt(row.Cells["النهائي"].Value);
+
+            row.Cells["المجموع"].Value = att + tasks + mid + fin;
+        }
+
+        private int ToInt(object v)
+        {
+            if (v == null || v == DBNull.Value) return 0;
+            int x;
+            return int.TryParse(v.ToString(), out x) ? x : 0;
+        }
+
+        private void dgvGrades_CurrentCellDirtyStateChanged(object sender, EventArgs e)
+        {
+            if (dgvGrades.IsCurrentCellDirty)
+                dgvGrades.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        }
+
+        private void btnSaveGrades_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                foreach (DataGridViewRow row in dgvGrades.Rows)
+                {
+                    string studentId = row.Cells["الرقم_الجامعي"].Value.ToString();
+
+                    int att = ToInt(row.Cells["الحضور"].Value);
+                    int mid = ToInt(row.Cells["النصفي"].Value);
+                    int fin = ToInt(row.Cells["النهائي"].Value);
+
+                    // تحقق بسيط: لا سالب
+                    if (att < 0 || mid < 0 || fin < 0)
+                    {
+                        MessageBox.Show("لا يمكن إدخال قيم سالبة.");
+                        return;
+                    }
+
+                    _svc.UpsertTermScores(studentId, _offeringId, att, mid, fin);
+                }
+
+                MessageBox.Show("تم حفظ الدرجات ✅");
+
+                // إعادة تحميل للتأكد من التحديث
+                LoadGrades();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        }
+
+        private void dgvGrades_CellValidating(object sender, DataGridViewCellValidatingEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+
+            string col = dgvGrades.Columns[e.ColumnIndex].Name;
+            if (col != "الحضور" && col != "النصفي" && col != "النهائي") return;
+
+            // السماح بالفراغ -> يعتبر 0
+            string txt = (e.FormattedValue ?? "").ToString().Trim();
+            if (txt == "")
+                return;
+
+            int value;
+            if (!int.TryParse(txt, out value) || value < 0)
+            {
+                MessageBox.Show("أدخل رقم صحيح (0 أو أكثر).");
+                e.Cancel = true;
+                return;
+            }
+            // التحقق من السقف بعد إدخال القيمة
+            var row = dgvGrades.Rows[e.RowIndex];
+
+            int att = (col == "الحضور") ? value : ToInt(row.Cells["الحضور"].Value);
+            int tasks = ToInt(row.Cells["التكاليف"].Value);
+            int mid = (col == "النصفي") ? value : ToInt(row.Cells["النصفي"].Value);
+            int fin = (col == "النهائي") ? value : ToInt(row.Cells["النهائي"].Value);
+
+            int total = att + tasks + mid + fin;
+            int maxTotal = ToInt(row.Cells["السقف"].Value);
+
+            if (maxTotal > 0 && total > maxTotal)
+            {
+                MessageBox.Show("المجموع تجاوز سقف المادة (" + maxTotal + ").");
+                e.Cancel = true;
+                return;
+            }
+        }
+
+        private void dgvGrades_CellContentClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+
+            if (dgvGrades.Columns[e.ColumnIndex].Name == "btnWork")
+            {
+                string studentId = dgvGrades.Rows[e.RowIndex].Cells["الرقم_الجامعي"].Value.ToString();
+
+                var f = new TeacherStudentWorkForm(_teacherId, _offeringId, studentId);
+                f.ShowDialog();
+
+                // بعد ما يرجع من التصحيح، حدث الجدول (التكاليف قد تتغير)
+                LoadGrades();
+                EnsureStudentWorkButtonColumn();
+            }
+        }
+
+        private void EnsureStudentWorkButtonColumn()
+        {
+            if (dgvGrades.Columns["btnWork"] != null) return;
+
+            var col = new DataGridViewButtonColumn();
+            col.Name = "btnWork";
+            col.HeaderText = "أعمال";
+            col.Text = "عرض";
+            col.UseColumnTextForButtonValue = true;
+            col.Width = 70;
+
+            dgvGrades.Columns.Insert(0, col);
+        }
+        private void LoadPlan()
+        {
+            dgvPlan.DataSource = _svc.GetLecturePlan(_offeringId);
+
+            // إخفاء PlanLectureId (تقني)
+            if (dgvPlan.Columns["PlanLectureId"] != null)
+                dgvPlan.Columns["PlanLectureId"].Visible = false;
+
+            // تنسيق التاريخ
+            if (dgvPlan.Columns["وقت_الشرح"] != null)
+                dgvPlan.Columns["وقت_الشرح"].DefaultCellStyle.Format = "yyyy-MM-dd HH:mm";
+
+            dgvPlan.ReadOnly = true;
+            dgvPlan.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvPlan.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            dgvPlan.AllowUserToAddRows = false;
+
+            LoadPlanStatsUI();
+        }
+        private void LoadPlanStatsUI()
+        {
+            var dt = _svc.GetPlanStats(_offeringId);
+            if (dt.Rows.Count == 0) return;
+
+            int plannedTotal = ToInt(dt.Rows[0]["PlannedTotal"]);
+            int plannedCovered = ToInt(dt.Rows[0]["PlannedCovered"]);
+            int extraTotal = ToInt(dt.Rows[0]["ExtraTotal"]);
+
+            int remaining = plannedTotal - plannedCovered;
+            if (remaining < 0) remaining = 0;
+
+            lblPlanStats.Text = $"     عدد المحاضرات المقررة:{plannedTotal}              تم شرح :{plannedCovered}             المتبقي: {remaining}                   إضافية: {extraTotal}";
+
+            prgPlan.Minimum = 0;
+            prgPlan.Maximum = plannedTotal > 0 ? plannedTotal : 1;
+            prgPlan.Value = plannedTotal > 0 ? Math.Min(plannedCovered, plannedTotal) : 0;
+        }
+
+        private void btnMarkCovered_Click(object sender, EventArgs e)
+        {
+            if (dgvPlan.CurrentRow == null) return;
+
+            int id = Convert.ToInt32(dgvPlan.CurrentRow.Cells["PlanLectureId"].Value);
+            _svc.SetLectureCovered(id, true, _teacherId);
+
+            LoadPlan();
+        }
+
+        private void btnUnmarkCovered_Click(object sender, EventArgs e)
+        {
+            if (dgvPlan.CurrentRow == null) return;
+
+            int id = Convert.ToInt32(dgvPlan.CurrentRow.Cells["PlanLectureId"].Value);
+            _svc.SetLectureCovered(id, false, _teacherId);
+
+            LoadPlan();
+        }
+
+        private void btnRefreshPlan_Click(object sender, EventArgs e)
+        {
+            LoadPlan();
+        }
+        private void btnAddExtraLecture_Click(object sender, EventArgs e)
+        {
+            var f = new AddLectureForm();
+            if (f.ShowDialog() != DialogResult.OK) return;
+
+            _svc.AddExtraLecture(_offeringId, f.LectureTitle, f.LectureContent, _teacherId);
+
+            LoadPlan();
+        }
+
+    }
+}
